@@ -2,40 +2,29 @@ package main
 
 import (
 	"fmt"
+	"go-seone-peripherals-driver/peripherals"
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
-	"periph.io/x/conn/v3/driver/driverreg"
-	"periph.io/x/conn/v3/gpio"
-	"periph.io/x/conn/v3/gpio/gpioreg"
-	"periph.io/x/conn/v3/physic"
 	"periph.io/x/host/v3"
 )
 
-func ExamplePinOut_pWM() {
-	// Make sure periph is initialized.
-	// TODO: Use host.Init(). It is not used in this example to prevent circular
-	// go package import.
-	if _, err := driverreg.Init(); err != nil {
-		log.Fatal(err)
-	}
-
-	// Use gpioreg GPIO pin registry to find a GPIO pin by name.
-	pinName := "13"
-	p := gpioreg.ByName(pinName)
-	if p == nil {
-		log.Fatalf("Failed to find pin %s", pinName)
-	}
-
-	defer p.Halt()
-
-	err := p.Out(gpio.High)
+func main() {
+	_, err := host.Init()
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	vcselPin, err := peripherals.NewVCSELPin()
+	if err != nil {
+		log.Printf("Error occurred while initializing the VCSEL pin: %s. Exiting.", err)
+		return
+	}
+	defer vcselPin.Halt()
 
 	var halt = make(chan os.Signal)
 	signal.Notify(halt, syscall.SIGTERM)
@@ -44,46 +33,29 @@ func ExamplePinOut_pWM() {
 	go func() {
 		select {
 		case <-halt:
-			if err := p.Halt(); err != nil {
+			if err := vcselPin.Halt(); err != nil {
 				log.Println(err)
 			}
 			os.Exit(1)
 		}
 	}()
 
-	t := time.NewTicker(1 * time.Second)
+	mu := sync.Mutex{}
 
-	// for l := gpio.Low; ; l = !l {
-	// 	log.Println(l)
-	// 	err := p.Out(l)
-	// 	if err != nil {
-	// 		log.Fatal(err)
-	// 	}
-	// 	<-t.C
-	// }
-
-	for l := 0; l < 100; l += 10 {
-		duty, err := gpio.ParseDuty(fmt.Sprintf("%d%%", l))
-		if err != nil {
-			log.Fatal(err)
-		}
-		log.Println(l, duty)
-		if err := p.PWM(
-			duty,
-			50*physic.KiloHertz,
-		); err != nil {
-			log.Fatal(err)
-		}
-		<-t.C
-	}
-}
-
-func main() {
-	state, err := host.Init()
+	client, err := peripherals.NewMQTTClient()
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("Error occurred while initializing MQTT client: %s. Exiting.", err)
+		return
 	}
-	log.Println("Host init status: ", state.Loaded)
+	getVcselSubscriptionTopic := fmt.Sprintf("seone/%s%s", peripherals.SEONE_SN, peripherals.VCSEL_GET_MQTT_TOPIC_PATH)
+	log.Printf("Subscribing to VCSEL Getter: %s", getVcselSubscriptionTopic)
+	client.Subscribe(getVcselSubscriptionTopic, 2, peripherals.GetVCSELHandler(vcselPin, &mu))
 
-	ExamplePinOut_pWM()
+	setVcselSubscriptionTopic := fmt.Sprintf("seone/%s%s", peripherals.SEONE_SN, peripherals.VCSEL_SET_MQTT_TOPIC_PATH)
+	log.Printf("Subscribing to VCSEL Setter: %s", setVcselSubscriptionTopic)
+	client.Subscribe(setVcselSubscriptionTopic, 2, peripherals.SetVCSELHandler(vcselPin, &mu))
+
+	for {
+		time.Sleep(1 * time.Second)
+	}
 }
